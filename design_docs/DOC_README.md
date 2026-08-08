@@ -53,6 +53,17 @@ before any other doc in this directory.
   incoming staging and review in the circle, and same-session or new-session
   acceptance. Cleartext carrier, stated honestly; encryption and a network
   carrier are later.
+- [2026-08-08_persona_timeline_design.md](2026-08-08_persona_timeline_design.md)
+  - **DESIGN SKETCH** (from Mark, no implementation planned). A persona as a
+  lens over the session: click a participant, see their contributions laid out
+  linearly with breaks where the turn passed, plus a combined loopline of
+  everyone's turns in order. Grounds the concept in what the model records
+  (authorship exists only in the signed hand-off envelope; `HistoryNode` and
+  `Layer` carry no author, so the missing piece is a turn mark written at
+  accept time from the verified envelope), names the owning layers (scenograph
+  timeline scene, platen/forme arrangement, sprigging regions; hocket supplies
+  the musical reading), and draws the doctrine line: provenance reading yes,
+  editing from the timeline is the arrange-view canary.
 - [2026-08-06_update_settings_persistence_plan.md](2026-08-06_update_settings_persistence_plan.md)
   - **LANDED.** Update policy becomes a stored device setting. `UpdateSettings`
   persists to `update-settings.json` through `UpdateSettingsProvider` (atomic
