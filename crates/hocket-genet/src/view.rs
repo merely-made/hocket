@@ -274,6 +274,69 @@ fn rail(state: &AppState) -> Child {
             .attr("class", "handoff-note")
             .attr("role", "status"),
     ));
+    // The switch, staged. Offered only when there is a family persona to join;
+    // the confirmation names the token that stops working, because that is the
+    // thing the user has already handed to people.
+    if let Some(staged) = state.persona_switch() {
+        let short: String = staged.losing_token.chars().take(12).collect();
+        kids.push(Box::new(
+            el(
+                "div",
+                (
+                    el(
+                        "div",
+                        text(format!("Speak as persona {}?", staged.profile)),
+                    )
+                    .attr("class", "handoff-note"),
+                    el(
+                        "div",
+                        text(format!(
+                            "Your contact token changes. The one you have shared ({short}...) stops reaching you, so peers holding it need the new one."
+                        )),
+                    )
+                    .attr("class", "handoff-note"),
+                    Box::new(clickable(
+                        el("div", text("Switch and re-share"))
+                            .attr("class", "project-command")
+                            .attr("role", "button"),
+                        |state: &mut AppState, _| state.confirm_persona_switch(),
+                    )),
+                    Box::new(clickable(
+                        el("div", text("Keep this identity"))
+                            .attr("class", "project-command")
+                            .attr("role", "button"),
+                        |state: &mut AppState, _| state.decline_persona_switch(),
+                    )),
+                ),
+            )
+            .attr("class", "handoff-review")
+            .attr("role", "dialog")
+            .attr("aria-label", "Confirm persona switch"),
+        ));
+    } else if state.family_to_join().is_some() {
+        kids.push(Box::new(clickable(
+            el("div", text("Use my shared persona"))
+                .attr("class", "project-command")
+                .attr("role", "button")
+                .attr(
+                    "aria-label",
+                    "Speak as the persona shared with your other Merely apps",
+                ),
+            |state: &mut AppState, _| state.offer_persona_switch(),
+        )));
+    }
+    // After a switch: the old token is dead and peers need the new one. A row
+    // rather than a one-shot dialog, because it stays true until they act.
+    if state.needs_reshare() {
+        kids.push(Box::new(
+            el(
+                "div",
+                text("Your contact token changed. Copy it and send it to anyone who hands off to you."),
+            )
+            .attr("class", "handoff-note")
+            .attr("role", "status"),
+        ));
+    }
     // Your contact token: a peer needs it to address a hand-off here. The rail
     // keeps the short fingerprint visible; the full 64-char token goes to the
     // clipboard on demand rather than cluttering the circle.

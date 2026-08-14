@@ -58,6 +58,17 @@ enum ProjectStatus {
     Error(String),
 }
 
+/// A persona switch waiting for confirmation, and what it costs.
+#[derive(Clone, Debug)]
+pub struct PersonaSwitch {
+    /// The family persona this would become.
+    pub profile: String,
+    /// The contact token that stops naming this application once it does.
+    /// Shown so the confirmation is about a concrete thing the user has
+    /// already given people, not an abstraction.
+    pub losing_token: String,
+}
+
 pub struct AppState {
     pub session: Session,
     pub history: History,
@@ -101,6 +112,17 @@ pub struct AppState {
     /// token or by accepting an incoming hand-off (which addresses the reply
     /// back to its sender). Host-local; a recipient is not project state.
     recipient: Option<Ed25519PublicKey>,
+    /// A persona switch staged for confirmation, and what it will cost.
+    ///
+    /// Staged rather than applied on the click, for the same reason an
+    /// incoming hand-off is: joining the family persona changes the contact
+    /// token peers already hold, and that is not something to discover after
+    /// the fact.
+    persona_switch: Option<PersonaSwitch>,
+    /// Said once after a switch: the token has changed and needs re-sharing.
+    /// Cleared when the user copies it, because copying is the act the notice
+    /// is asking for.
+    reshare_notice: bool,
     /// A received, authenticated hand-off staged for review. It is not applied
     /// to the live session until the musician accepts it; discarding drops it.
     incoming: Option<ReceivedHandoff>,
@@ -187,6 +209,8 @@ impl AppState {
             identity,
             clipboard: SystemClipboard::new().ok(),
             recipient: None,
+            persona_switch: None,
+            reshare_notice: false,
             incoming: None,
             export_length: ExportLength::OneCycle,
             audio_devices,
@@ -280,6 +304,9 @@ impl AppState {
     /// service, reporting the outcome honestly (including an unavailable
     /// clipboard or identity).
     pub fn copy_contact_token(&mut self) {
+        // Copying is what the re-share notice is asking for, so doing it
+        // answers the notice rather than leaving it up to nag.
+        self.reshare_notice = false;
         let Some(token) = self.contact_token() else {
             self.project_status = ProjectStatus::Error("identity unavailable".to_string());
             return;
@@ -492,6 +519,72 @@ impl AppState {
         {
             self.project_status = ProjectStatus::Error("project worker stopped".to_string());
         }
+    }
+
+    /// Offer to join the family persona, staged for confirmation.
+    ///
+    /// Reads the cost off the identity rather than describing it in the
+    /// abstract: the token that stops working is the one on screen.
+    pub fn offer_persona_switch(&mut self) {
+        let Ok(identity) = self.identity.as_ref() else {
+            return;
+        };
+        let Some(profile) = identity.family_to_join() else {
+            return;
+        };
+        self.persona_switch = Some(PersonaSwitch {
+            profile: profile.to_string(),
+            losing_token: identity.contact_token(),
+        });
+    }
+
+    /// The family persona this identity could join, when there is one.
+    pub fn family_to_join(&self) -> Option<String> {
+        self.identity
+            .as_ref()
+            .ok()
+            .and_then(|identity| identity.family_to_join().map(str::to_string))
+    }
+
+    /// The staged switch, for the confirmation card.
+    pub fn persona_switch(&self) -> Option<&PersonaSwitch> {
+        self.persona_switch.as_ref()
+    }
+
+    /// Back out. Nothing has changed, which is the point of staging.
+    pub fn decline_persona_switch(&mut self) {
+        self.persona_switch = None;
+    }
+
+    /// Do it: speak as the family persona from now on.
+    ///
+    /// The re-share notice goes up on success, because the switch has just
+    /// invalidated the token every peer holds and saying so is the only thing
+    /// that makes the change recoverable for them.
+    pub fn confirm_persona_switch(&mut self) {
+        let Some(_staged) = self.persona_switch.take() else {
+            return;
+        };
+        let Ok(identity) = self.identity.as_mut() else {
+            return;
+        };
+        match identity.join_family(&personae::bootstrap::default_vault_dir()) {
+            Ok(()) => {
+                self.reshare_notice = true;
+                // The addressed reply belonged to the old identity's
+                // conversation; keeping it would send the next hand-off as
+                // somebody the peer no longer recognises.
+                self.recipient = None;
+            }
+            Err(error) => {
+                eprintln!("[hocket] could not join the family persona: {error}");
+            }
+        }
+    }
+
+    /// Whether the token needs re-sharing after a switch.
+    pub fn needs_reshare(&self) -> bool {
+        self.reshare_notice
     }
 
     /// Whether a hand-off is staged for review.

@@ -7,7 +7,7 @@ use personae::roster;
 use personae::vault::IdentityStorage;
 use personae::{
     DerivedKeyAttestation, Ed25519Keypair, Ed25519PublicKey, IdentityError, IdentityProvider,
-    SealedIdentityProvider, SealedRecordStorage, load_or_create_auto_unlock_root,
+    InMemoryProvider, SealedIdentityProvider, SealedRecordStorage, load_or_create_auto_unlock_root,
 };
 use serde_json::Value;
 
@@ -60,10 +60,56 @@ impl IdentityHome {
     }
 }
 
+/// What the user agreed to when they joined a family persona.
+///
+/// Records the **key**, not just the profile name. Consent is to a specific
+/// identity: if the family persona later points at a different key, this does
+/// not carry over and Hocket asks again rather than rotating a second time on
+/// the strength of a decision made about somebody else.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct FamilyConsent {
+    profile: String,
+    /// The master public key the user accepted, as a contact token.
+    public_key: String,
+}
+
+/// Where the consent record lives, under Hocket's own data root. Not secret:
+/// it names a public key and a profile id, both already visible to anyone who
+/// can list the vault.
+fn consent_path(data_root: &Path) -> PathBuf {
+    data_root.join("family-persona.json")
+}
+
+fn load_consent(data_root: &Path) -> Option<FamilyConsent> {
+    let bytes = std::fs::read(consent_path(data_root)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn save_consent(data_root: &Path, consent: &FamilyConsent) -> Result<(), IdentityError> {
+    let path = consent_path(data_root);
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(consent).unwrap_or_default())?;
+        std::fs::rename(tmp, &path)
+    };
+    write().map_err(|error| IdentityError::Backend(format!("record family persona: {error}")))
+}
+
 /// A durable host identity whose secret is held in memory only while Hocket runs.
 pub struct LocalIdentity {
     provider: SealedIdentityProvider,
+    /// The identity Hocket speaks as, when that is a family persona rather
+    /// than its own record. `None` is the ordinary case: `provider` answers
+    /// everything. An `InMemoryProvider` rather than a bare keypair because
+    /// attestation is a provider concern and personae keeps its own.
+    speaking: Option<InMemoryProvider>,
     home: IdentityHome,
+    /// Where the consent record is written. Empty for an identity opened
+    /// without a data root (tests that only exercise the sealed record).
+    data_root: PathBuf,
 }
 
 impl LocalIdentity {
@@ -81,7 +127,8 @@ impl LocalIdentity {
             )
         })?;
         let mut identity = Self::open_with_root(&data_root.join("personae/records"), root_key)?;
-        identity.home = identity.settle_home(&bootstrap::default_vault_dir());
+        identity.data_root = data_root;
+        identity.settle(&bootstrap::default_vault_dir(), Unlock::from_env());
         Ok(identity)
     }
 
@@ -91,9 +138,11 @@ impl LocalIdentity {
         let provider = SealedIdentityProvider::load_or_create(&records, IDENTITY_RECORD)?;
         Ok(Self {
             provider,
+            speaking: None,
             home: IdentityHome::Local {
                 reason: "the shared vault was not consulted".into(),
             },
+            data_root: PathBuf::new(),
         })
     }
 
@@ -107,54 +156,144 @@ impl LocalIdentity {
     /// keeps its own identity, because following the family choice there would
     /// silently make the user a different person to every peer holding their
     /// token. That switch is theirs to make, knowing the cost.
-    fn settle_home(&self, vault_dir: &Path) -> IdentityHome {
-        self.settle_home_with(vault_dir, Unlock::from_env())
-    }
-
-    /// [`Self::settle_home`] naming its unlock, so a test can use the portable
-    /// passphrase vault every platform has rather than the Windows-only OS
-    /// ladder.
-    fn settle_home_with(&self, vault_dir: &Path, unlock: Unlock) -> IdentityHome {
+    /// Settle where this identity lives, adopting a joined persona's key when
+    /// the user has consented to it.
+    ///
+    /// One vault open answers everything: which persona the family resolves
+    /// to, whether it already holds this application's key, and whether the
+    /// user agreed to speak as it. The unlock is used here and nowhere else,
+    /// so a caller that named a passphrase vault is not silently re-read
+    /// against the OS ladder half way through.
+    fn settle(&mut self, vault_dir: &Path, unlock: Unlock) {
+        self.speaking = None;
         let opened = match bootstrap::open_storage(vault_dir, unlock) {
             Ok(opened) => opened,
             Err(error) => {
-                return IdentityHome::Local {
+                self.home = IdentityHome::Local {
                     reason: format!("no shared vault here: {error}"),
                 };
+                return;
             }
         };
         let family = match roster::resolve_profile(&*opened.storage, vault_dir) {
             Ok(id) => id,
             Err(error) => {
-                return IdentityHome::Local {
+                self.home = IdentityHome::Local {
                     reason: format!("the vault would not say which persona: {error}"),
                 };
+                return;
             }
         };
+        // Hocket's own record key, deliberately, not the one it speaks as:
+        // this decides whether the vault already holds *this application's*
+        // identity.
         let mine = self.provider.master_public_key().to_bytes();
         match opened.storage.load_profile(&family) {
-            Ok(profile) if profile.master.public_key().to_bytes() == mine => IdentityHome::Family {
-                profile: family.0,
-                protection: opened.description,
-            },
-            Ok(_) => IdentityHome::Apart {
-                family_profile: family.0,
-            },
-            // Absent: adopt into it, key intact.
-            Err(_) => match roster::import_profile(
-                &*opened.storage,
-                &family,
-                "Hocket",
-                self.provider.master_keypair().clone(),
-            ) {
-                Ok(_) => IdentityHome::Family {
+            Ok(profile) if profile.master.public_key().to_bytes() == mine => {
+                self.home = IdentityHome::Family {
                     profile: family.0,
                     protection: opened.description,
-                },
-                Err(error) => IdentityHome::Local {
-                    reason: format!("could not place this identity in the vault: {error}"),
-                },
+                };
+            }
+            Ok(profile) => {
+                let joined = InMemoryProvider::from_seed(profile.master.to_seed());
+                let token = encode_contact_token(&joined.master_public_key());
+                // Consent is to a key, not to a name: a family persona that has
+                // since moved to a different identity does not carry the old
+                // agreement forward, so Hocket goes back to asking.
+                let agreed = load_consent(&self.data_root)
+                    .is_some_and(|c| c.profile == family.0 && c.public_key == token);
+                if agreed {
+                    self.speaking = Some(joined);
+                    self.home = IdentityHome::Family {
+                        profile: family.0,
+                        protection: opened.description,
+                    };
+                } else {
+                    self.home = IdentityHome::Apart {
+                        family_profile: family.0,
+                    };
+                }
+            }
+            // Absent: adopt into it, key intact.
+            Err(_) => {
+                self.home = match roster::import_profile(
+                    &*opened.storage,
+                    &family,
+                    "Hocket",
+                    self.provider.master_keypair().clone(),
+                ) {
+                    Ok(_) => IdentityHome::Family {
+                        profile: family.0,
+                        protection: opened.description,
+                    },
+                    Err(error) => IdentityHome::Local {
+                        reason: format!("could not place this identity in the vault: {error}"),
+                    },
+                };
+            }
+        }
+    }
+
+    /// Join the family persona: speak as it from now on, and remember that the
+    /// user agreed to this key.
+    ///
+    /// **This is the rotation.** The contact token changes, so every peer
+    /// holding the old one can no longer address a hand-off here until it is
+    /// re-shared. Callers must have said so before calling. Consent is written
+    /// before the switch, so an identity that cannot record the decision does
+    /// not quietly make it.
+    pub fn join_family(&mut self, vault_dir: &Path) -> Result<(), IdentityError> {
+        self.join_family_with(vault_dir, Unlock::from_env())
+    }
+
+    /// [`Self::join_family`] naming its unlock, for tests on the portable
+    /// passphrase vault every platform has.
+    fn join_family_with(
+        &mut self,
+        vault_dir: &Path,
+        unlock: Unlock,
+    ) -> Result<(), IdentityError> {
+        let IdentityHome::Apart { family_profile } = self.home.clone() else {
+            return Err(IdentityError::Backend(
+                "this identity is already the family persona, or there is no vault".into(),
+            ));
+        };
+        let opened = bootstrap::open_storage(vault_dir, unlock)?;
+        let profile = opened
+            .storage
+            .load_profile(&personae::vault::ProfileId(family_profile.clone()))?;
+        let joined = InMemoryProvider::from_seed(profile.master.to_seed());
+        save_consent(
+            &self.data_root,
+            &FamilyConsent {
+                profile: family_profile.clone(),
+                public_key: encode_contact_token(&joined.master_public_key()),
             },
+        )?;
+        self.speaking = Some(joined);
+        self.home = IdentityHome::Family {
+            profile: family_profile,
+            protection: opened.description,
+        };
+        Ok(())
+    }
+
+    /// Who this identity derives from: a joined family persona when there is
+    /// one, Hocket's own record otherwise.
+    fn speaker(&self) -> &dyn IdentityProvider {
+        match &self.speaking {
+            Some(joined) => joined,
+            None => &self.provider,
+        }
+    }
+
+    /// The family persona this identity could join, and by joining, become.
+    /// `None` when there is nothing to join.
+    pub fn family_to_join(&self) -> Option<&str> {
+        match &self.home {
+            IdentityHome::Apart { family_profile } => Some(family_profile.as_str()),
+            _ => None,
         }
     }
 
@@ -165,7 +304,9 @@ impl LocalIdentity {
 
     /// Short display fingerprint of the public key. This is not an address.
     pub fn fingerprint(&self) -> String {
-        self.provider
+        // Through the speaker, not the record: after joining a family persona
+        // the fingerprint on screen must be the one peers will actually see.
+        self.speaker()
             .master_public_key()
             .to_bytes()
             .iter()
@@ -179,7 +320,7 @@ impl LocalIdentity {
     /// key, so a peer can address a hand-off back to this identity. A friendlier
     /// checksummed encoding is a later refinement.
     pub fn contact_token(&self) -> String {
-        encode_contact_token(&self.provider.master_public_key())
+        encode_contact_token(&self.speaker().master_public_key())
     }
 }
 
@@ -213,15 +354,15 @@ pub fn parse_contact_token(token: &str) -> Result<Ed25519PublicKey, String> {
 
 impl IdentityProvider for LocalIdentity {
     fn master_public_key(&self) -> Ed25519PublicKey {
-        self.provider.master_public_key()
+        self.speaker().master_public_key()
     }
 
     fn derive_keypair(&self, salt: &[u8]) -> Result<Ed25519Keypair, IdentityError> {
-        self.provider.derive_keypair(salt)
+        self.speaker().derive_keypair(salt)
     }
 
     fn attest_derived_key(&self, salt: &[u8]) -> Result<DerivedKeyAttestation, IdentityError> {
-        self.provider.attest_derived_key(salt)
+        self.speaker().attest_derived_key(salt)
     }
 }
 
@@ -332,7 +473,9 @@ mod tests {
         let identity = LocalIdentity::open_with_root(records.path(), [0x61; 32]).unwrap();
         let before = identity.master_public_key();
 
-        let home = identity.settle_home_with(vault.path(), unlock);
+        let mut identity = identity;
+        identity.settle(vault.path(), unlock);
+        let home = identity.home().clone();
 
         assert!(matches!(home, IdentityHome::Family { .. }), "{home:?}");
         assert_eq!(
@@ -370,12 +513,13 @@ mod tests {
         let theirs_public = theirs.master.public_key();
         drop(storage);
 
-        let identity = LocalIdentity::open_with_root(records.path(), [0x62; 32]).unwrap();
+        let mut identity = LocalIdentity::open_with_root(records.path(), [0x62; 32]).unwrap();
         let mine = identity.master_public_key();
-        let home = identity.settle_home_with(
+        identity.settle(
             vault.path(),
             Unlock::Passphrase(b"hocket-identity-test".to_vec().into()),
         );
+        let home = identity.home().clone();
 
         assert!(matches!(home, IdentityHome::Apart { .. }), "{home:?}");
         assert_eq!(identity.master_public_key(), mine, "nothing rotated");
@@ -400,17 +544,16 @@ mod tests {
         // adopting again or reading as a stranger.
         let records = tempfile::tempdir().unwrap();
         let (vault, unlock) = scratch_vault("again");
-        let identity = LocalIdentity::open_with_root(records.path(), [0x63; 32]).unwrap();
-        assert!(matches!(
-            identity.settle_home_with(vault.path(), unlock),
-            IdentityHome::Family { .. }
-        ));
+        let mut identity = LocalIdentity::open_with_root(records.path(), [0x63; 32]).unwrap();
+        identity.settle(vault.path(), unlock);
+        assert!(matches!(identity.home(), IdentityHome::Family { .. }));
 
-        let again = LocalIdentity::open_with_root(records.path(), [0x63; 32]).unwrap();
-        let home = again.settle_home_with(
+        let mut again = LocalIdentity::open_with_root(records.path(), [0x63; 32]).unwrap();
+        again.settle(
             vault.path(),
             Unlock::Passphrase(b"hocket-identity-test".to_vec().into()),
         );
+        let home = again.home().clone();
         assert!(matches!(home, IdentityHome::Family { .. }), "{home:?}");
     }
 
@@ -423,11 +566,12 @@ mod tests {
         let file = closed.path().join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
 
-        let identity = LocalIdentity::open_with_root(records.path(), [0x64; 32]).unwrap();
-        let home = identity.settle_home_with(
+        let mut identity = LocalIdentity::open_with_root(records.path(), [0x64; 32]).unwrap();
+        identity.settle(
             &file.join("vault"),
             Unlock::Passphrase(b"hocket-identity-test".to_vec().into()),
         );
+        let home = identity.home().clone();
         assert!(matches!(home, IdentityHome::Local { .. }), "{home:?}");
     }
 
@@ -453,6 +597,143 @@ mod tests {
             reason: "no vault".into(),
         };
         assert!(local.summary().contains("no vault"));
+    }
+
+    /// An identity opened against a scratch records root AND a data root, so
+    /// the consent record has somewhere to live.
+    fn identity_with_root(
+        records: &Path,
+        data_root: &Path,
+        key: u8,
+    ) -> LocalIdentity {
+        let mut identity = LocalIdentity::open_with_root(records, [key; 32]).unwrap();
+        identity.data_root = data_root.to_path_buf();
+        identity
+    }
+
+    fn test_unlock() -> Unlock {
+        Unlock::Passphrase(b"hocket-identity-test".to_vec().into())
+    }
+
+    /// A vault whose family persona is somebody else, so the identity under
+    /// test lands Apart and has something to join.
+    fn vault_with_stranger(dir: &Path) -> Ed25519PublicKey {
+        let storage = bootstrap::open_storage(dir, test_unlock()).unwrap().storage;
+        personae::roster::create_profile(
+            &*storage,
+            &personae::vault::ProfileId("default".into()),
+            "Somebody else",
+        )
+        .unwrap()
+        .master
+        .public_key()
+    }
+
+    #[test]
+    fn joining_the_family_persona_is_the_rotation_and_it_is_explicit() {
+        // The switch surface's whole point: the token changes, and only
+        // because the user asked.
+        let records = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let theirs = vault_with_stranger(vault.path());
+
+        let mut identity = identity_with_root(records.path(), data.path(), 0x71);
+        identity.settle(vault.path(), test_unlock());
+        let before = identity.master_public_key();
+        assert_eq!(identity.family_to_join(), Some("default"));
+        assert_ne!(before, theirs, "not yet joined");
+
+        identity.join_family_with(vault.path(), test_unlock()).unwrap();
+
+        assert_eq!(
+            identity.master_public_key(),
+            theirs,
+            "Hocket now speaks as the family persona"
+        );
+        assert_ne!(
+            identity.master_public_key(),
+            before,
+            "which is a rotation: the old contact token no longer names this app"
+        );
+        assert!(identity.family_to_join().is_none(), "nothing left to join");
+    }
+
+    #[test]
+    fn a_joined_persona_survives_a_restart_without_asking_again() {
+        let records = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let theirs = vault_with_stranger(vault.path());
+
+        let mut identity = identity_with_root(records.path(), data.path(), 0x72);
+        identity.settle(vault.path(), test_unlock());
+        identity.join_family_with(vault.path(), test_unlock()).unwrap();
+
+        let mut restarted = identity_with_root(records.path(), data.path(), 0x72);
+        restarted.settle(vault.path(), test_unlock());
+        assert!(
+            matches!(restarted.home(), IdentityHome::Family { .. }),
+            "{:?}",
+            restarted.home()
+        );
+        assert_eq!(restarted.master_public_key(), theirs);
+    }
+
+    #[test]
+    fn consent_is_to_a_key_so_a_moved_family_persona_asks_again() {
+        // The second-rotation trap: the user agreed to be *this* person, not
+        // to follow whatever the family choice becomes. If the persona later
+        // names a different key, Hocket goes back to Apart rather than
+        // rotating again on the strength of the old decision.
+        let records = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        vault_with_stranger(vault.path());
+
+        let mut identity = identity_with_root(records.path(), data.path(), 0x73);
+        identity.settle(vault.path(), test_unlock());
+        identity.join_family_with(vault.path(), test_unlock()).unwrap();
+        let joined = identity.master_public_key();
+
+        // The family persona is replaced by a different key under the same id.
+        let storage = bootstrap::open_storage(vault.path(), test_unlock())
+            .unwrap()
+            .storage;
+        let replacement = personae::vault::Profile::new(
+            personae::vault::ProfileId("default".into()),
+            "Replaced",
+            Ed25519Keypair::from_seed([0x99; 32]),
+        );
+        storage.save_profile(&replacement).unwrap();
+        drop(storage);
+
+        let mut after = identity_with_root(records.path(), data.path(), 0x73);
+        after.settle(vault.path(), test_unlock());
+        assert!(
+            matches!(after.home(), IdentityHome::Apart { .. }),
+            "consent does not carry to a different key: {:?}",
+            after.home()
+        );
+        assert_ne!(after.master_public_key(), joined);
+        assert_ne!(
+            after.master_public_key(),
+            replacement.master.public_key(),
+            "and it certainly does not silently become the replacement"
+        );
+    }
+
+    #[test]
+    fn joining_is_refused_when_there_is_nothing_to_join() {
+        let records = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+
+        // An empty vault adopts Hocket, so it is already the family persona.
+        let mut identity = identity_with_root(records.path(), data.path(), 0x74);
+        identity.settle(vault.path(), test_unlock());
+        assert!(matches!(identity.home(), IdentityHome::Family { .. }));
+        assert!(identity.join_family_with(vault.path(), test_unlock()).is_err());
     }
 
     #[test]
