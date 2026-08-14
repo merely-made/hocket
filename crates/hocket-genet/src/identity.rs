@@ -47,8 +47,12 @@ impl IdentityHome {
     /// The one-line reading for the circle.
     pub fn summary(&self) -> String {
         match self {
-            Self::Family { profile, protection } => {
-                format!("Persona {profile}, shared across your Merely apps. Held by {protection}.")
+            // The persona, not the protection. personae's description names the
+            // backend AND its full path, which is right for a CLI line and
+            // swamps a rail: it wrapped to seven lines in the circle. The
+            // string is still on the variant for a detail view that has room.
+            Self::Family { profile, .. } => {
+                format!("Persona {profile}, shared across your Merely apps.")
             }
             Self::Apart { family_profile } => format!(
                 "Hocket's own identity. Your persona {family_profile} is a different key, and moving to it would change the contact token you have already shared."
