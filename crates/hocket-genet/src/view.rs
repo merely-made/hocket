@@ -265,6 +265,15 @@ fn rail(state: &AppState) -> Child {
         peer("You", "YU", amber, you_sub, true),
         Box::new(el("div", text(session_note)).attr("class", "handoff-note")),
     ];
+    // Whose identity this is: shared with the rest of the Merely family, or
+    // Hocket's own. Beside the token rather than buried in a settings screen,
+    // because it is the same question the token answers for a peer, and a
+    // musician about to paste one deserves to know which person it names.
+    kids.push(Box::new(
+        el("div", text(state.identity_home_label()))
+            .attr("class", "handoff-note")
+            .attr("role", "status"),
+    ));
     // Your contact token: a peer needs it to address a hand-off here. The rail
     // keeps the short fingerprint visible; the full 64-char token goes to the
     // clipboard on demand rather than cluttering the circle.

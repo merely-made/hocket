@@ -256,6 +256,20 @@ impl AppState {
         }
     }
 
+    /// Where this identity lives: shared with the rest of the Merely family, or
+    /// Hocket's own, and why.
+    ///
+    /// Separate from [`Self::identity_status_label`], which answers "which key
+    /// is this" with a fingerprint. This answers "is it the same person the
+    /// other applications know", which is the question a musician handing off a
+    /// session actually has.
+    pub fn identity_home_label(&self) -> String {
+        match &self.identity {
+            Ok(identity) => identity.home().summary(),
+            Err(error) => format!("Identity unavailable: {error}"),
+        }
+    }
+
     /// The local identity's contact token (full public key as hex), if the
     /// identity is available. A peer needs this to address a hand-off here.
     pub fn contact_token(&self) -> Option<String> {

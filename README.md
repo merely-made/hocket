@@ -1,93 +1,61 @@
 # Hocket
 
 Hocket is a cross-platform loop recorder for building a session one turn at a
-time. Its collaboration model is passing the mic around a circle: people add
-parts asynchronously rather than trying to jam across a network.
+time. Collaboration is passing the mic around a circle: people add parts
+asynchronously rather than jamming across a network. It is a phrase sampler,
+not a DAW: a session is a small set of mono tracks, recording appends a
+layer, and layers mute independently.
 
-It is a phrase sampler, not a DAW. A session is a small set of mono tracks;
-recording appends a layer, and layers can be muted independently. The default
-looper-pedal profile sums unmuted layers. The Deeler profile uses one selected
-layer per track.
+## Status (2026-08-12)
 
-## Status
+Pre-alpha. The desktop app works for local solo looping; the pass-the-mic
+side is deliberately local until the hand-off UI and a carrier exist.
 
-Pre-alpha. The Genet desktop host, framework-independent session model, and
-Firewheel audio engine are working together for local record, playback, track
-mute, solo, tempo, click, master-clock capture, and history-backed track
-creation. Native Open and Save controls queue project work off the UI thread,
-then persist or reopen a project through Muniment. A saved `.hock` file is an
-ordinary zip archive: a `manifest.cbor` plus one `media/<hash>.wav` per captured
-phrase, so it opens in any zip tool and its audio imports anywhere, without
-Hocket. New sessions begin empty.
+- Working desktop host (Genet/winit, Windows-first): record, playback,
+  per-track mute/solo, tempo, click, master-clock capture, history-backed
+  track creation, native Open/Save, per-launch audio device selection, real
+  cached waveforms, configurable meter ballistics.
+- Open project format: a `.hock` file is an ordinary zip of `manifest.cbor`
+  plus one `media/<hash>.wv` per captured phrase (lossless WavPack via the
+  sibling [wavicle](https://github.com/merely-made/wavicle) codec, switched
+  from WAV 2026-07-18). It opens in any zip tool without Hocket.
+- Loop-first WAV mix export through the project worker, including explicit
+  musical-bar export for unequal loops.
+- Windows auto-update proven end to end (signed feed; an installed 0.1.0
+  updated itself to 0.2.0; a tampered artifact was refused). Update policy is
+  a persisted device setting.
+- Engine-side hand-off groundwork: a signed, recipient-addressed envelope
+  with durable-sender attestation and same-root branch acceptance. The host
+  cannot send, receive, review, or accept one yet, and envelope bytes are not
+  encrypted. Durable identity works on Windows (DPAPI-sealed); other
+  platforms report identity unavailable.
 
-Summed and per-layer Chisel waveforms now project real stored samples through a
-content-addressed cache, and unavailable media is labeled instead of replaced by
-a generated silhouette. Output meters use configurable shared attack, release,
-peak-hold, and peak-decay ballistics.
+Current plans live in [design_docs/](design_docs/DOC_README.md): the hand-off
+UI over a file carrier (2026-07-18 plan, scoped, not started), then the
+macOS/Linux auto-update legs.
 
-Not built yet: peer hand-off and synchronization.
-The pass-the-mic UI is deliberately local until those pieces exist.
+## Use
 
-The engine now has a signed, recipient-addressed hand-off envelope for a
-complete project snapshot and its media, plus a transactional same-root
-branch-acceptance rule. Envelope v2 identifies the durable sender that
-authorized its session key. It is transport-neutral groundwork only: the
-desktop host cannot send, receive, review, or accept one yet, and raw envelope
-bytes are not encrypted.
+Two profiles ship: looper-pedal (default: four tracks, layered overdub) and
+Deeler (ten tracks, one selected layer per track). Track counts and capture
+settings are session settings, not fixed limits.
 
-On Windows, the desktop host now restores one durable local identity from a
-`personae` sealed record protected by DPAPI and shows its short public
-fingerprint in the circle. The identity remains outside project files. Other
-platforms report identity unavailable until their OS unlock backend exists.
-
-History now retains divergent branches and can integrate a same-root remote
-graph without replacing local work. It does not yet reconcile conflicting edits
-into a new merged head.
-
-Audio input and output can be selected per launch from the transport. Those are
-host settings rather than project state; device preference persistence and
-hot-plug refresh remain follow-ups.
-
-Start with [design_docs/DOC_README.md](design_docs/DOC_README.md) for the
-authoritative project and planning documents.
-
-## Profiles
-
-- Looper-pedal, the default: four tracks, layered overdub, optional master
-  clock, and variable-length capture when the clock is off.
-- Deeler: ten tracks, click-driven fixed-bar capture, and one selected layer
-  per track.
-
-Track count, phrase length, capture settings, and layer behavior are session
-settings, not fixed product limits.
-
-## Workspace
-
-```
-crates/
-  hocket-engine/    Firewheel graph, capture, click, media-store abstraction
-  hocket-model/     Framework-independent session, tracks, layers, history
-  hocket-headless/  Scripted engine harness
-  hocket-genet/    Genet/winit desktop host and one-screen recorder UI
-design_docs/         Product reference and active implementation plans
-```
-
-`hocket-model` owns durable session truth. `hocket-engine` projects that
-truth into a Firewheel runtime. `hocket-genet` owns host interaction and does
-not become a second session model.
-
-## Build
-
-The workspace expects the sibling `woodshed` checkout because
-`hocket-engine` uses its shared `audio-primitives` crate.
-
-```text
-cargo run -p hocket-genet
-cargo run -p hocket-headless
+```sh
+cargo run -p hocket-genet      # desktop app
+cargo run -p hocket-headless   # scripted engine harness
 cargo test -p hocket-model
 cargo test -p hocket-engine
 ```
 
+Building needs a sibling `../genet` checkout for the `[patch.crates-io]` path
+entries; the other family dependencies resolve as git dependencies. Release
+cutting is documented in `design_docs/RELEASING.md`.
+
 ## License
 
-Dual-licensed under Apache-2.0 or MIT, at your option.
+MIT OR Apache-2.0.
+
+---
+
+*This README was generated by AI and will be edited by the author upon
+release.*
