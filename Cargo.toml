@@ -95,7 +95,7 @@ paint_list_render = { git = "https://github.com/merely-made/netrender.git", bran
 # Host-side surface/compose types only; backend features come from
 # netrender's per-target split. Single wgpu 29 tree now the Masonry app
 # (wgpu 28) is retired.
-wgpu = { version = "29", default-features = false, features = ["std"] }
+wgpu = { version = "30", default-features = false, features = ["std"] }
 # Pure OKLCH seed-to-palette theming (shared; woodshed's too). A genet
 # component; the standalone mirror repo retires with the 2026-07-23
 # consolidation.
@@ -160,3 +160,11 @@ stylo_taffy = { path = "../genet/support/patches/stylo_taffy" }
 # genet's vendored forks (taffy float-layout, in-process ipc-channel).
 taffy = { path = "../genet/support/patches/taffy" }
 ipc-channel = { path = "../genet/support/patches/ipc-channel" }
+
+# Vello on wgpu 30. Upstream vello 0.10 still requires wgpu 29, so netrender
+# (and through it this app's render path) takes vello from the owned fork:
+# the v0.10.0 tag plus exactly the API changes in linebender/vello#1754.
+# `[patch]` applies only from the top-level manifest and is NOT inherited
+# from genet or netrender, so every app workspace restates it. Retires by
+# deletion when upstream ships a wgpu-30 vello.
+vello = { git = "https://github.com/mark-ik/vello.git", branch = "mark-ik/wgpu-30" }
