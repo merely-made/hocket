@@ -292,7 +292,8 @@ impl App {
             ph,
             ExternalTexturePlacement::new([0.0, 0.0, pw as f32, ph as f32]),
         );
-        frame.present();
+        // wgpu 30 moved presentation from SurfaceTexture to Queue.
+        host.queue().present(frame);
 
         // Scenario self-capture: the receipt is the frame just presented, read
         // back from the same rasterized scene (not a re-render).

@@ -40,7 +40,7 @@ muniment = { git = "https://github.com/merely-made/mere.git", branch = "main", v
 armillary = { git = "https://github.com/merely-made/mere.git", branch = "main", version = "0.1.0" }
 # Identity root for signed, recipient-bound hand-off envelopes. This is a
 # host-agnostic protocol dependency, not project/session state.
-personae = { git = "https://github.com/merely-made/mere.git", branch = "main", version = "0.1.0" }
+personae = { git = "https://github.com/merely-made/mere.git", branch = "main", version = "0.2.0" }
 # Pure-Rust WavPack codec (repos/wavicle). Stores .hock media as lossless,
 # importable, wasm-capable .wv instead of WAV. `encode` is on because Hocket
 # both writes and reads media; MediaRef identity stays Hocket's BLAKE3 over the
