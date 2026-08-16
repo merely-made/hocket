@@ -8266,16 +8266,16 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "tinct"
+version = "0.1.2"
+
+[[patch.unused]]
 name = "cambium-winit"
 version = "0.3.0"
 
 [[patch.unused]]
 name = "netfetcher"
 version = "0.1.1"
-
-[[patch.unused]]
-name = "tinct"
-version = "0.1.2"
 
 [[patch.unused]]
 name = "chartulary"
